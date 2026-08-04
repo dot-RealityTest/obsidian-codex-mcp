@@ -7,15 +7,50 @@ Enables LLMs to interact with Obsidian vaults directly on disk (no Obsidian app 
 import os
 import logging
 from typing import Any, Optional
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from obsidian_client import ObsidianVaultClient
 from bases import build_base
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastMCP server
-mcp = FastMCP("kika-obsidian")
+# --- call counter: one JSONL line per tool call (ts, tool, client) ---------
+import json as _json, os as _os
+from datetime import datetime as _dt, timezone as _tz
+from pathlib import Path as _Path
+
+_CALL_LOG = _Path(
+    _os.environ.get("KIKA_OBSIDIAN_CALL_LOG")
+    or _Path(_os.environ.get("XDG_STATE_HOME") or _Path.home() / ".local" / "state")
+    / "kika-obsidian-mcp" / "calls.jsonl"
+)
+
+async def _count_tool_calls(_ctx, _call_next):
+    """mcp 2.x server middleware; counting must never break the server."""
+    if _ctx.method == "tools/call":
+        try:
+            try:
+                _cp = _ctx.session.client_params
+                _info = getattr(_cp, "client_info", None) or getattr(_cp, "clientInfo")
+                _client, _ver = _info.name, _info.version
+            except Exception:
+                _client, _ver = "unknown", None
+            _CALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with _CALL_LOG.open("a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                    "tool": (_ctx.params or {}).get("name", "?"),
+                    "client": _client,
+                    "client_version": _ver,
+                }) + "\n")
+        except Exception:
+            pass
+    return await _call_next(_ctx)
+
+# Initialize the MCP server (mcp SDK 2.x)
+mcp = MCPServer("kika-obsidian", middleware=[_count_tool_calls])
+# ---------------------------------------------------------------------------
+
 
 # Global vault client (initialized when needed)
 _vault_client = None
